@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .engine import Report
+
+# таймзона отчёта: UTC+5 (Астана, без перехода на летнее время)
+REPORT_TZ = timezone(timedelta(hours=5))
+REPORT_TZ_LABEL = "UTC+5"
 
 DEFAULT_BRAND = "Антиплагиат"
 DEFAULT_BRAND_URL = ""   # домен в справке не показываем
@@ -119,7 +123,7 @@ def render_html(
     body = _render_body(report)
     text = report.normalized_text
     word_count = len(re.findall(r"\S+", text))
-    generated = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    generated = datetime.now(REPORT_TZ).strftime("%d.%m.%Y %H:%M:%S") + f" ({REPORT_TZ_LABEL})"
 
     items = []
     for s in report.top_sources(50):
@@ -168,9 +172,9 @@ def render_html(
   li {{ font-size: 12.5px; margin-bottom: 4px; }}
   a {{ color: #1a0dab; text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  .uniqueness-circle {{ flex-shrink: 0; width: 96px; height: 96px; border-radius: 50%;
+  .uniqueness-circle {{ flex-shrink: 0; width: 108px; height: 108px; border-radius: 50%;
              display: flex; align-items: center; justify-content: center; white-space: nowrap;
-             font-size: 17px; font-weight: bold; border: 8px solid {color}; color: {color}; }}
+             font-size: 16px; font-weight: bold; border: 8px solid {color}; color: {color}; }}
   .warn {{ background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412;
            padding: 10px 14px; border-radius: 8px; margin: 12px 0; font-size: 13px; }}
   .section-title {{ font-size: 16px; font-weight: bold; color: #1a3c5e; margin: 20px 0 6px;
@@ -206,7 +210,7 @@ def render_html(
       <div class="stat-item"><span class="label">Количество слов:</span> <span class="value">{word_count}</span></div>
       <div class="stat-item"><span class="label">Источники совпадений:</span> <span class="value">{sources_html}</span></div>
     </div>
-    <div class="uniqueness-circle">{uniqueness:.0f}%</div>
+    <div class="uniqueness-circle">{uniqueness:.2f}%</div>
   </div>
 
   <div class="section-title">Проверенный текст</div>
