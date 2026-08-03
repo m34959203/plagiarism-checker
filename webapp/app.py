@@ -13,7 +13,7 @@ import os
 import re
 
 from flask import (
-    Flask, abort, jsonify, redirect, render_template_string, request, url_for,
+    Flask, Response, abort, jsonify, redirect, render_template_string, request, url_for,
 )
 
 from plagiarism.providers import ProviderError, get_provider
@@ -301,12 +301,40 @@ def job_status(job_id):
     return jsonify(job.public())
 
 
+def _report_bar(job_id: str) -> str:
+    return (
+        '<div style="position:sticky;top:0;background:#111;color:#fff;padding:10px 16px;'
+        'font:14px -apple-system,Segoe UI,Arial,sans-serif;display:flex;justify-content:center;'
+        'gap:26px;z-index:99;print-color-adjust:exact" class="noprint">'
+        '<a href="/" style="color:#8ab4ff;text-decoration:none">← проверить другой текст</a>'
+        f'<a href="/job/{job_id}/pdf" style="color:#8ab4ff;text-decoration:none">⭳ Скачать PDF</a>'
+        '</div><style>@media print {.noprint{display:none!important}}</style>'
+    )
+
+
 @app.get("/job/<job_id>/report")
 def job_report(job_id):
     job = jobs.get(job_id)
     if job is None or job.status != "done":
         abort(404)
-    return BACK_BANNER + job.report_html
+    return _report_bar(job_id) + job.report_html
+
+
+@app.get("/job/<job_id>/pdf")
+def job_pdf(job_id):
+    job = jobs.get(job_id)
+    if job is None or job.status != "done":
+        abort(404)
+    try:
+        from weasyprint import HTML
+    except Exception as exc:  # библиотека/системные зависимости не установлены
+        return (f"Генерация PDF недоступна на сервере: {exc}", 503)
+    pdf = HTML(string=job.report_html).write_pdf()
+    return Response(
+        pdf,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="antiplagiat-{job_id}.pdf"'},
+    )
 
 
 def _index_error(msg: str, text: str, threshold: float):
