@@ -217,8 +217,7 @@ def render_html(
   <div class="text-content">{body}</div>
 
   <footer>
-    Проверено {generated} · сервис «{brand_disp}»{url_foot}. Метод: поиск дословных
-    совпадений фраз в открытом вебе. Отчёт носит справочный характер.
+    Проверено {generated} · сервис «{brand_disp}»{url_foot}.
   </footer>
 </div>
 </body>
