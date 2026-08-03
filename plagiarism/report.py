@@ -1,19 +1,22 @@
 """Формирование отчётов: консоль и самодостаточный HTML.
 
-HTML-отчёт оформлен как «справка о результатах проверки текста на заимствования»
-(вдохновлён шаблоном antiplagiat_service): формальная шапка, круг с процентом
-уникальности, блок статистики со списком источников и проверенный текст с
-подсветкой совпадений. Свёрстан под печать A4 и просмотр в браузере.
+HTML-отчёт оформлен как «справка о результатах проверки текстового документа на
+уникальность» — по вёрстке образца (шапка, круг с процентом уникальности, блок
+статистики со списком источников, проверенный текст с подсветкой). Свёрстан под
+печать A4 и просмотр в браузере. Брендинг — наш сервис; проверка выполняется
+нашим движком (см. параметры brand/brand_note).
 """
 
 from __future__ import annotations
 
-import hashlib
 import html
 import re
 from datetime import datetime, timezone
 
 from .engine import Report
+
+DEFAULT_BRAND = "Антиплагиат"
+DEFAULT_BRAND_URL = ""   # домен в справке не показываем
 
 
 # --- консоль ----------------------------------------------------------------
@@ -93,46 +96,47 @@ def _render_body(report: Report) -> str:
     return "".join(out)
 
 
-# --- HTML-справка -----------------------------------------------------------
+# --- HTML-справка (по вёрстке образца, наш бренд) ---------------------------
 
-def _circle_color(originality: float) -> str:
-    """Цвет круга уникальности: <50 красный, <85 оранжевый, иначе зелёный."""
-    if originality < 50:
-        return "#e53935"
-    if originality < 85:
-        return "#fb8c00"
-    return "#43a047"
+def _uniq_color(uniqueness: float) -> str:
+    """Цвет по уникальности: <50 красный, <85 оранжевый, иначе зелёный."""
+    if uniqueness < 50:
+        return "#ff0000"
+    if uniqueness < 85:
+        return "#ff9900"
+    return "#4CAF50"
 
 
-def render_html(report: Report, *, title: str = "Справка о проверке текста") -> str:
-    orig = report.originality
-    color = _circle_color(orig)
+def render_html(
+    report: Report,
+    *,
+    title: str = "Отчёт о проверке текста на уникальность",
+    brand: str = DEFAULT_BRAND,
+    brand_url: str = DEFAULT_BRAND_URL,
+) -> str:
+    uniqueness = report.originality
+    color = _uniq_color(uniqueness)
     body = _render_body(report)
-
     text = report.normalized_text
     word_count = len(re.findall(r"\S+", text))
-    char_count = len(text)
-    char_count_ns = len(re.sub(r"\s+", "", text))
     generated = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
-    report_id = hashlib.sha1((text + generated).encode("utf-8")).hexdigest()[:10].upper()
 
-    # список источников совпадений
     items = []
     for s in report.top_sources(50):
         url = html.escape(s.example_url, quote=True)
-        items.append(
-            f'<li><a href="{url}" target="_blank" rel="noopener">{url}</a> '
-            f'— {s.max_score:.0f}% совпадения, фрагментов: {s.fragments}</li>'
-        )
-    sources_html = ("<ul>" + "".join(items) + "</ul>") if items else \
-        '<span class="muted">Совпадений не найдено</span>'
+        items.append(f'<li><a href="{url}">{url}</a> ({s.max_score:.0f}% совпадения)</li>')
+    sources_html = ("<ul>" + "".join(items) + "</ul>") if items else "Совпадений не найдено"
+
+    brand_disp = html.escape(brand)
+    brand_url_disp = html.escape(brand_url)
+    url_sub = f" · {brand_url_disp}" if brand_url else ""
+    url_foot = f" ({brand_url_disp})" if brand_url else ""
 
     warn = ""
     if report.stopped_early:
         warn = (
-            f'<div class="warn">⚠ Проверка остановлена досрочно: '
-            f'{html.escape(report.stop_reason)}. Непроверенных фрагментов: '
-            f'{report.remaining}. При повторном запуске проверенное берётся из кэша.</div>'
+            f'<div class="warn">Проверка остановлена досрочно: '
+            f'{html.escape(report.stop_reason)}. Непроверенных фрагментов: {report.remaining}.</div>'
         )
 
     return f"""<!DOCTYPE html>
@@ -142,43 +146,41 @@ def render_html(report: Report, *, title: str = "Справка о провер�
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
 <style>
-  @page {{ size: A4 portrait; margin: 18mm; }}
+  @page {{ size: A4 portrait; margin: 20mm; @bottom-right {{ content: counter(page);
+           font-size: 12px; color: #666; }} }}
   * {{ box-sizing: border-box; }}
-  body {{ font-family: 'Times New Roman', Georgia, serif; margin: 0;
+  body {{ font-family: 'Times New Roman', 'DejaVu Serif', serif; margin: 0;
          background: #eceff1; color: #000; }}
-  .sheet {{ max-width: 820px; margin: 24px auto; background: #fff; padding: 40px 48px 56px;
+  .sheet {{ max-width: 820px; margin: 24px auto; background: #fff; padding: 38px 46px 52px;
             box-shadow: 0 2px 16px rgba(0,0,0,.12); }}
-  .header {{ text-align: center; margin-bottom: 18px; padding-bottom: 12px;
+  .header {{ text-align: center; margin-bottom: 12px; padding-bottom: 8px;
              border-bottom: 1px solid #e0e0e0; }}
   .title {{ font-size: 22px; font-weight: bold; color: #1a3c5e; margin: 0; line-height: 1.25; }}
   .subtitle {{ font-size: 14px; color: #666; margin-top: 6px; }}
-  .stats {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }}
+  .stats-container {{ display: flex; justify-content: space-between; align-items: flex-start;
+                      gap: 20px; }}
   .stats-left {{ flex-grow: 1; min-width: 0; }}
-  .stat {{ font-size: 14px; margin-bottom: 7px; }}
-  .stat .label {{ color: #008000; font-weight: bold; }}
-  .stat .value {{ color: #000; word-break: break-word; }}
-  .muted {{ color: #777; }}
+  .stat-item {{ font-size: 14px; margin-bottom: 6px; }}
+  .stat-item .label {{ color: #008000; font-weight: bold; }}
+  .stat-item .value {{ color: #000; word-break: break-word; }}
+  .uniqueness-value {{ color: {color}; font-weight: bold; }}
   ul {{ padding-left: 18px; margin: 4px 0 0; }}
   li {{ font-size: 12.5px; margin-bottom: 4px; }}
   a {{ color: #1a0dab; text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  .circle-wrap {{ flex-shrink: 0; display: flex; flex-direction: column; align-items: center; }}
-  .circle {{ width: 118px; height: 118px; border-radius: 50%;
-             display: flex; align-items: center; justify-content: center;
-             border: 9px solid {color}; color: {color}; }}
-  .circle .num {{ font-size: 28px; font-weight: bold; line-height: 1; }}
-  .circle-cap {{ font-size: 11px; color: #666; margin-top: 7px; text-transform: uppercase;
-                 letter-spacing: .5px; }}
+  .uniqueness-circle {{ flex-shrink: 0; width: 96px; height: 96px; border-radius: 50%;
+             display: flex; align-items: center; justify-content: center; white-space: nowrap;
+             font-size: 17px; font-weight: bold; border: 8px solid {color}; color: {color}; }}
   .warn {{ background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412;
-           padding: 10px 14px; border-radius: 8px; margin: 14px 0; font-size: 13px; }}
-  .section-title {{ font-size: 16px; font-weight: bold; color: #1a3c5e; margin: 22px 0 8px;
+           padding: 10px 14px; border-radius: 8px; margin: 12px 0; font-size: 13px; }}
+  .section-title {{ font-size: 16px; font-weight: bold; color: #1a3c5e; margin: 20px 0 6px;
                     padding-bottom: 3px; border-bottom: 1px dashed #e0e0e0; }}
-  .text-content {{ font-size: 14px; line-height: 1.45; text-align: justify; hyphens: auto;
+  .text-content {{ font-size: 14px; line-height: 1.35; text-align: justify; hyphens: auto;
                    white-space: pre-wrap; word-wrap: break-word; }}
   a.hit {{ background: #ffe2e2; border-bottom: 1px solid {color}; color: #000;
            text-decoration: none; padding: 0 1px; }}
   a.hit:hover {{ background: #ffcccc; }}
-  footer {{ margin-top: 26px; padding-top: 10px; border-top: 1px solid #e0e0e0;
+  footer {{ margin-top: 22px; padding-top: 8px; border-top: 1px solid #e0e0e0;
             font-size: 11px; color: #888; text-align: center; }}
   @media print {{
     body {{ background: #fff; }}
@@ -191,36 +193,28 @@ def render_html(report: Report, *, title: str = "Справка о провер�
 <div class="sheet">
   <div class="header">
     <div class="title">СПРАВКА</div>
-    <div class="title">о результатах проверки текста на заимствования</div>
-    <div class="subtitle">Проверка выполнена в сервисе «Антиплагиат» · antiplagiat.technokod.kz</div>
+    <div class="title">о результатах проверки текстового документа на уникальность</div>
+    <div class="subtitle">Проверка выполнена в сервисе «{brand_disp}»{url_sub}</div>
   </div>
 
   {warn}
 
-  <div class="stats">
+  <div class="stats-container">
     <div class="stats-left">
-      <div class="stat"><span class="label">Дата и время проверки:</span> <span class="value">{generated}</span></div>
-      <div class="stat"><span class="label">Идентификатор отчёта:</span> <span class="value">{report_id}</span></div>
-      <div class="stat"><span class="label">Процент оригинальности:</span> <span class="value">{orig:.1f}%</span></div>
-      <div class="stat"><span class="label">Процент заимствований:</span> <span class="value">{report.percent:.1f}%</span></div>
-      <div class="stat"><span class="label">Количество слов:</span> <span class="value">{word_count}</span></div>
-      <div class="stat"><span class="label">Количество символов:</span> <span class="value">{char_count} (без пробелов: {char_count_ns})</span></div>
-      <div class="stat"><span class="label">Проверено фрагментов:</span> <span class="value">{len(report.checked_fragments)} из {report.total_fragments}, совпало: {len(report.matched_fragments)}</span></div>
-      <div class="stat"><span class="label">Порог совпадения:</span> <span class="value">{report.threshold:.0f}% · провайдер: {html.escape(report.provider)}</span></div>
-      <div class="stat"><span class="label">Источники совпадений:</span> <span class="value">{sources_html}</span></div>
+      <div class="stat-item"><span class="label">Дата и время проверки:</span> <span class="value">{generated}</span></div>
+      <div class="stat-item"><span class="label">Процент уникальности:</span> <span class="value uniqueness-value">{uniqueness:.2f}%</span></div>
+      <div class="stat-item"><span class="label">Количество слов:</span> <span class="value">{word_count}</span></div>
+      <div class="stat-item"><span class="label">Источники совпадений:</span> <span class="value">{sources_html}</span></div>
     </div>
-    <div class="circle-wrap">
-      <div class="circle"><span class="num">{orig:.0f}%</span></div>
-      <div class="circle-cap">оригинальность</div>
-    </div>
+    <div class="uniqueness-circle">{uniqueness:.0f}%</div>
   </div>
 
   <div class="section-title">Проверенный текст</div>
   <div class="text-content">{body}</div>
 
   <footer>
-    Метод: точное совпадение фраз через поисковый API. Отчёт носит справочный характер
-    и отражает дословные заимствования, найденные в открытом вебе. · {generated}
+    Проверено {generated} · сервис «{brand_disp}»{url_foot}. Метод: поиск дословных
+    совпадений фраз в открытом вебе. Отчёт носит справочный характер.
   </footer>
 </div>
 </body>
