@@ -1,0 +1,15 @@
+services:
+  web:
+    build: .
+    container_name: antiplagiat-web
+    restart: unless-stopped
+    ports:
+      - "8790:8790"
+    env_file:
+      - .env
+    environment:
+      WEB_PROVIDER: ${WEB_PROVIDER:-serper}
+      WEB_MAX_QUERIES: ${WEB_MAX_QUERIES:-30}
+      WEB_CACHE: /data/web_cache.json
+    volumes:
+      - ./data:/data

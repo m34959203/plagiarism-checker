@@ -1,0 +1,24 @@
+# secrets
+.env
+*.key
+
+# кэш проверки и отчёты
+.plagiarism_cache.json
+*_cache.json
+report*.html
+uploads/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

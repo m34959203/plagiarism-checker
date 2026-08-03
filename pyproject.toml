@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plagiarism-checker"
+version = "1.0.0"
+description = "CLI и веб-инструмент проверки текста на плагиат по интернету через поисковый API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "beautifulsoup4>=4.12",
+    "rapidfuzz>=3.6",
+]
+
+[project.scripts]
+plagiarism = "plagiarism.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["plagiarism*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
