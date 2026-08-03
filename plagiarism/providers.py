@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -76,44 +77,87 @@ class SerperProvider(SearchProvider):
     free_limit = 2500
     ENDPOINT = "https://google.serper.dev/search"
 
-    def __init__(self, api_key: str, *, top_k: int = 5, timeout: int = 20):
-        if not api_key:
+    #: базовый бесплатный лимит одного аккаунта serper
+    PER_KEY_FREE = 2500
+
+    def __init__(self, api_key, *, top_k: int = 5, timeout: int = 20):
+        """``api_key`` — строка или список строк. Список ключей образует пул:
+        при исчерпании лимита (429) провайдер сам переключается на следующий
+        ключ, а RateLimitError бросается только когда исчерпаны ВСЕ ключи."""
+        keys = api_key if isinstance(api_key, (list, tuple)) else [api_key]
+        self.keys = [str(k).strip() for k in keys if k and str(k).strip()]
+        if not self.keys:
             raise ProviderError(
                 "Не задан SERPER_API_KEY. Получите ключ на https://serper.dev "
-                "и добавьте его в .env (см. .env.example)."
+                "и добавьте его в .env (см. .env.example). Для пула — SERPER_API_KEYS."
             )
-        self.api_key = api_key
         self.top_k = top_k
         self.timeout = timeout
+        self._idx = 0
+        self._exhausted: set[int] = set()
+        # общий бесплатный запас растёт пропорционально числу ключей
+        self.free_limit = self.PER_KEY_FREE * len(self.keys)
+
+    @property
+    def key_count(self) -> int:
+        return len(self.keys)
+
+    def _advance_key(self) -> bool:
+        """Переключиться на следующий не исчерпанный ключ. False — если их нет."""
+        for step in range(1, len(self.keys) + 1):
+            j = (self._idx + step) % len(self.keys)
+            if j not in self._exhausted:
+                self._idx = j
+                return True
+        return False
+
+    @staticmethod
+    def _is_quota_error(resp) -> bool:
+        if resp.status_code == 429:
+            return True
+        # у serper исчерпание платного/бесплатного баланса иногда приходит как 403
+        if resp.status_code == 403:
+            body = (resp.text or "").lower()
+            return any(w in body for w in ("quota", "limit", "credit", "balance"))
+        return False
 
     def search(self, query: str) -> list[Result]:
         _require_requests()
-        try:
-            resp = requests.post(
-                self.ENDPOINT,
-                headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-                json={"q": self.exact(query), "num": self.top_k},
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:  # pragma: no cover - сеть
-            raise ProviderError(f"Сетевая ошибка serper: {exc}") from exc
-        if resp.status_code == 429:
-            raise RateLimitError("serper: превышен лимит запросов (429)")
-        if resp.status_code >= 500:
-            raise ProviderError(f"serper: ошибка сервера {resp.status_code}")
-        if resp.status_code != 200:
-            raise ProviderError(f"serper: HTTP {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        results = []
-        for item in (data.get("organic") or [])[: self.top_k]:
-            results.append(
-                Result(
-                    title=item.get("title", ""),
-                    url=item.get("link", ""),
-                    snippet=item.get("snippet", ""),
+        while True:
+            key = self.keys[self._idx]
+            try:
+                resp = requests.post(
+                    self.ENDPOINT,
+                    headers={"X-API-KEY": key, "Content-Type": "application/json"},
+                    json={"q": self.exact(query), "num": self.top_k},
+                    timeout=self.timeout,
                 )
-            )
-        return results
+            except requests.RequestException as exc:  # pragma: no cover - сеть
+                raise ProviderError(f"Сетевая ошибка serper: {exc}") from exc
+
+            if self._is_quota_error(resp):
+                self._exhausted.add(self._idx)
+                if not self._advance_key():
+                    raise RateLimitError(
+                        f"serper: все {len(self.keys)} ключ(и) исчерпали лимит (429)"
+                    )
+                continue  # тот же запрос — следующим ключом
+            if resp.status_code >= 500:
+                raise ProviderError(f"serper: ошибка сервера {resp.status_code}")
+            if resp.status_code != 200:
+                raise ProviderError(f"serper: HTTP {resp.status_code}: {resp.text[:200]}")
+
+            data = resp.json()
+            results = []
+            for item in (data.get("organic") or [])[: self.top_k]:
+                results.append(
+                    Result(
+                        title=item.get("title", ""),
+                        url=item.get("link", ""),
+                        snippet=item.get("snippet", ""),
+                    )
+                )
+            return results
 
 
 # --- Google Custom Search ---------------------------------------------------
@@ -260,12 +304,35 @@ class MockProvider(SearchProvider):
 
 # --- фабрика ----------------------------------------------------------------
 
+def collect_serper_keys(env: dict) -> list[str]:
+    """Собрать все ключи serper из окружения, без дублей и в стабильном порядке.
+
+    Источники (все объединяются):
+      * ``SERPER_API_KEY``           — одиночный ключ (идёт первым);
+      * ``SERPER_API_KEYS``          — несколько ключей через запятую/пробел/перенос;
+      * ``SERPER_API_KEY_2..N``      — пронумерованные ключи.
+    """
+    keys: list[str] = []
+
+    def _add(raw: str) -> None:
+        for k in re.split(r"[,\s]+", raw or ""):
+            k = k.strip()
+            if k and k not in keys:
+                keys.append(k)
+
+    _add(env.get("SERPER_API_KEY", ""))
+    _add(env.get("SERPER_API_KEYS", ""))
+    for i in range(2, 21):
+        _add(env.get(f"SERPER_API_KEY_{i}", ""))
+    return keys
+
+
 def get_provider(name: str, env: dict | None = None, *, top_k: int = 5) -> SearchProvider:
     """Создать провайдера по имени, читая ключи из ``env`` (по умолчанию os.environ)."""
     env = dict(os.environ if env is None else env)
     name = (name or "serper").lower()
     if name == "serper":
-        return SerperProvider(env.get("SERPER_API_KEY", ""), top_k=top_k)
+        return SerperProvider(collect_serper_keys(env), top_k=top_k)
     if name == "google":
         return GoogleCSEProvider(
             env.get("GOOGLE_API_KEY", ""), env.get("GOOGLE_CSE_ID", ""), top_k=top_k

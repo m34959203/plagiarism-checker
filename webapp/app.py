@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from flask import Flask, render_template_string, request
 
@@ -25,15 +26,34 @@ except ImportError:
     pass
 
 app = Flask(__name__)
+# формат числа с неразрывными пробелами: 15000 -> "15 000"
+app.jinja_env.filters["sp"] = lambda n: f"{int(n):,}".replace(",", " ")
 
 WEB_PROVIDER = os.environ.get("WEB_PROVIDER", "serper")
-WEB_MAX_QUERIES = int(os.environ.get("WEB_MAX_QUERIES", "30"))
+WEB_MAX_QUERIES = int(os.environ.get("WEB_MAX_QUERIES", "100"))
 WEB_THRESHOLD = float(os.environ.get("WEB_THRESHOLD", "80"))
-MAX_CHARS = int(os.environ.get("WEB_MAX_CHARS", "60000"))
+WEB_MAX_WORDS = int(os.environ.get("WEB_MAX_WORDS", "15000"))
 MIN_CHARS = int(os.environ.get("WEB_MIN_CHARS", "200"))
-# грубая оценка слов из символов (рус. ~6 симв/слово со пробелом)
-MAX_WORDS_APPROX = round(MAX_CHARS / 6 / 100) * 100
+# страховочный потолок символов (запас под 15k слов); при превышении — обрезаем
+MAX_CHARS = int(os.environ.get("WEB_MAX_CHARS", str(WEB_MAX_WORDS * 8)))
 CACHE_PATH = os.environ.get("WEB_CACHE", os.path.join(os.path.dirname(__file__), "web_cache.json"))
+
+
+def _count_words(text: str) -> int:
+    return len(re.findall(r"\S+", text))
+
+
+def _serper_key_count() -> int:
+    """Сколько ключей в пуле provider'а (для показа общего запаса на странице)."""
+    try:
+        p = get_provider(WEB_PROVIDER)
+        return getattr(p, "key_count", 1)
+    except Exception:
+        return 0
+
+
+KEYS_COUNT = _serper_key_count()
+TOTAL_QUOTA = KEYS_COUNT * 2500  # общий бесплатный запас запросов по всем ключам
 
 INDEX = r"""<!DOCTYPE html>
 <html lang="ru"><head>
@@ -88,14 +108,14 @@ INDEX = r"""<!DOCTYPE html>
     <textarea id="ta" name="text" maxlength="{{ max_chars }}"
               placeholder="Вставьте сюда текст для проверки…">{{ text or '' }}</textarea>
     <div class="counter" id="counter">
-      <span><b id="cw">0</b> слов · <b id="cc">0</b> / {{ '{:,}'.format(max_chars).replace(',', ' ') }} символов</span>
+      <span><b id="cw">0</b> / {{ max_words|sp }} слов · <b id="cc">0</b> символов</span>
       <span>минимум {{ min_chars }} символов</span>
     </div>
     <div class="limits">
-      📏 Лимиты: от <b>{{ min_chars }}</b> до <b>{{ '{:,}'.format(max_chars).replace(',', ' ') }}</b> символов
-      (≈ <b>{{ '{:,}'.format(max_words_approx).replace(',', ' ') }}</b> слов). За один прогон проверяется
-      до <b>{{ max_queries }}</b> фрагментов-фраз; длинный текст доверяйте за несколько запусков —
-      проверенное берётся из кэша и не тратит лимит.
+      📏 Максимум <b>{{ max_words|sp }} слов</b> за проверку. За один прогон проверяется
+      до <b>{{ max_queries }}</b> фрагментов-фраз; для полного покрытия длинного текста
+      запускайте повторно — проверенное берётся из кэша и не тратит лимит.
+      {% if keys_count > 1 %}<br>🔑 Пул из <b>{{ keys_count }}</b> ключей serper — общий запас ≈ <b>{{ total_quota|sp }}</b> запросов, переключение при исчерпании автоматическое.{% endif %}
     </div>
     <div class="row">
       <label>или файл: <input type="file" name="file" accept=".txt,.md"></label>
@@ -112,7 +132,7 @@ INDEX = r"""<!DOCTYPE html>
       var ta = document.getElementById('ta');
       var cc = document.getElementById('cc'), cw = document.getElementById('cw');
       var counter = document.getElementById('counter');
-      var MAX = {{ max_chars }}, MIN = {{ min_chars }};
+      var MAXC = {{ max_chars }}, MAXW = {{ max_words }}, MIN = {{ min_chars }};
       var nf = new Intl.NumberFormat('ru-RU');
       function upd() {
         var t = ta.value;
@@ -120,7 +140,7 @@ INDEX = r"""<!DOCTYPE html>
         var words = (t.trim().match(/\S+/g) || []).length;
         cc.textContent = nf.format(chars);
         cw.textContent = nf.format(words);
-        counter.classList.toggle('over', chars >= MAX || (chars > 0 && chars < MIN));
+        counter.classList.toggle('over', words > MAXW || chars >= MAXC || (chars > 0 && chars < MIN));
       }
       ta.addEventListener('input', upd);
       upd();
@@ -139,7 +159,8 @@ def index():
     return render_template_string(
         INDEX, provider=WEB_PROVIDER, max_queries=WEB_MAX_QUERIES,
         threshold=int(WEB_THRESHOLD), text=None, error=None,
-        max_chars=MAX_CHARS, min_chars=MIN_CHARS, max_words_approx=MAX_WORDS_APPROX,
+        max_chars=MAX_CHARS, min_chars=MIN_CHARS, max_words=WEB_MAX_WORDS,
+        keys_count=KEYS_COUNT, total_quota=TOTAL_QUOTA,
     )
 
 
@@ -166,6 +187,9 @@ def check():
         return _index_error(
             f"Слишком короткий текст — минимум {MIN_CHARS} символов.", text, threshold
         )
+    # ограничение по словам (основной лимит) + страховочный потолок по символам
+    if _count_words(text) > WEB_MAX_WORDS:
+        text = " ".join(re.findall(r"\S+", text)[:WEB_MAX_WORDS])
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
 
@@ -190,7 +214,8 @@ def _index_error(msg: str, text: str, threshold: float):
     return render_template_string(
         INDEX, provider=WEB_PROVIDER, max_queries=WEB_MAX_QUERIES,
         threshold=int(threshold), text=text, error=msg,
-        max_chars=MAX_CHARS, min_chars=MIN_CHARS, max_words_approx=MAX_WORDS_APPROX,
+        max_chars=MAX_CHARS, min_chars=MIN_CHARS, max_words=WEB_MAX_WORDS,
+        keys_count=KEYS_COUNT, total_quota=TOTAL_QUOTA,
     ), 400
 
 
