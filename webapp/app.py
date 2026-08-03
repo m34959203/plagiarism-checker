@@ -30,9 +30,12 @@ WEB_PROVIDER = os.environ.get("WEB_PROVIDER", "serper")
 WEB_MAX_QUERIES = int(os.environ.get("WEB_MAX_QUERIES", "30"))
 WEB_THRESHOLD = float(os.environ.get("WEB_THRESHOLD", "80"))
 MAX_CHARS = int(os.environ.get("WEB_MAX_CHARS", "60000"))
+MIN_CHARS = int(os.environ.get("WEB_MIN_CHARS", "200"))
+# грубая оценка слов из символов (рус. ~6 симв/слово со пробелом)
+MAX_WORDS_APPROX = round(MAX_CHARS / 6 / 100) * 100
 CACHE_PATH = os.environ.get("WEB_CACHE", os.path.join(os.path.dirname(__file__), "web_cache.json"))
 
-INDEX = """<!DOCTYPE html>
+INDEX = r"""<!DOCTYPE html>
 <html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Антиплагиат · проверка текста по интернету</title>
@@ -56,6 +59,13 @@ INDEX = """<!DOCTYPE html>
            padding: 12px 22px; font-size: 16px; font-weight: 600; cursor: pointer; margin-left: auto; }
   button:hover { background: #1d4ed8; }
   .note { color: #888; font-size: 13px; margin-top: 18px; }
+  .counter { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+             font-size: 13px; color: #888; margin-top: 6px; }
+  .counter b { color: #444; font-variant-numeric: tabular-nums; }
+  .counter.over b#cc { color: #dc2626; }
+  .limits { background: #eff6ff; border: 1px solid #dbeafe; color: #1e40af;
+            border-radius: 10px; padding: 10px 14px; font-size: 13px; margin: 14px 0 0; }
+  .limits b { font-weight: 600; }
   .err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
          padding: 12px 16px; border-radius: 10px; margin-bottom: 18px; }
   a { color: #2563eb; }
@@ -63,7 +73,9 @@ INDEX = """<!DOCTYPE html>
     body { background: #0f1115; color: #e6e6e6; }
     form { background: #171a21; border-color: #2a2f3a; }
     textarea, input[type=number] { background: #0f1115; color: #e6e6e6; border-color: #2a2f3a; }
-    p.lead, label, .note { color: #b8bdc7; }
+    p.lead, label, .note, .counter { color: #b8bdc7; }
+    .counter b { color: #e6e6e6; }
+    .limits { background: #172033; border-color: #24324d; color: #93c5fd; }
   }
 </style></head>
 <body><div class="wrap">
@@ -73,18 +85,47 @@ INDEX = """<!DOCTYPE html>
      совпадений и ссылки на источники.</p>
   {% if error %}<div class="err">{{ error }}</div>{% endif %}
   <form method="post" action="/check" enctype="multipart/form-data">
-    <textarea name="text" placeholder="Вставьте сюда текст для проверки…">{{ text or '' }}</textarea>
+    <textarea id="ta" name="text" maxlength="{{ max_chars }}"
+              placeholder="Вставьте сюда текст для проверки…">{{ text or '' }}</textarea>
+    <div class="counter" id="counter">
+      <span><b id="cw">0</b> слов · <b id="cc">0</b> / {{ '{:,}'.format(max_chars).replace(',', ' ') }} символов</span>
+      <span>минимум {{ min_chars }} символов</span>
+    </div>
+    <div class="limits">
+      📏 Лимиты: от <b>{{ min_chars }}</b> до <b>{{ '{:,}'.format(max_chars).replace(',', ' ') }}</b> символов
+      (≈ <b>{{ '{:,}'.format(max_words_approx).replace(',', ' ') }}</b> слов). За один прогон проверяется
+      до <b>{{ max_queries }}</b> фрагментов-фраз; длинный текст доверяйте за несколько запусков —
+      проверенное берётся из кэша и не тратит лимит.
+    </div>
     <div class="row">
       <label>или файл: <input type="file" name="file" accept=".txt,.md"></label>
       <label>порог схожести, %: <input type="number" name="threshold" value="{{ threshold }}" min="50" max="100"></label>
       <button type="submit">Проверить</button>
     </div>
     <div class="note">
-      Провайдер: <b>{{ provider }}</b>. На один прогон — до <b>{{ max_queries }}</b> запросов
-      к поисковому API (защита бесплатного лимита); повторные фразы берутся из кэша.
-      Метод ловит прежде всего дословные заимствования; перефразирование — хуже.
+      Провайдер: <b>{{ provider }}</b>. Метод ловит прежде всего дословные заимствования;
+      перефразирование — хуже.
     </div>
   </form>
+  <script>
+    (function () {
+      var ta = document.getElementById('ta');
+      var cc = document.getElementById('cc'), cw = document.getElementById('cw');
+      var counter = document.getElementById('counter');
+      var MAX = {{ max_chars }}, MIN = {{ min_chars }};
+      var nf = new Intl.NumberFormat('ru-RU');
+      function upd() {
+        var t = ta.value;
+        var chars = t.length;
+        var words = (t.trim().match(/\S+/g) || []).length;
+        cc.textContent = nf.format(chars);
+        cw.textContent = nf.format(words);
+        counter.classList.toggle('over', chars >= MAX || (chars > 0 && chars < MIN));
+      }
+      ta.addEventListener('input', upd);
+      upd();
+    })();
+  </script>
   <p class="note">CLI-версия и исходный код: <a href="https://github.com/m34959203/plagiarism-checker" target="_blank" rel="noopener">github.com/m34959203/plagiarism-checker</a></p>
 </div></body></html>"""
 
@@ -98,6 +139,7 @@ def index():
     return render_template_string(
         INDEX, provider=WEB_PROVIDER, max_queries=WEB_MAX_QUERIES,
         threshold=int(WEB_THRESHOLD), text=None, error=None,
+        max_chars=MAX_CHARS, min_chars=MIN_CHARS, max_words_approx=MAX_WORDS_APPROX,
     )
 
 
@@ -120,8 +162,10 @@ def check():
     except ValueError:
         threshold = WEB_THRESHOLD
 
-    if len(text) < 200:
-        return _index_error("Слишком короткий текст — вставьте хотя бы пару абзацев.", text, threshold)
+    if len(text) < MIN_CHARS:
+        return _index_error(
+            f"Слишком короткий текст — минимум {MIN_CHARS} символов.", text, threshold
+        )
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
 
@@ -146,6 +190,7 @@ def _index_error(msg: str, text: str, threshold: float):
     return render_template_string(
         INDEX, provider=WEB_PROVIDER, max_queries=WEB_MAX_QUERIES,
         threshold=int(threshold), text=text, error=msg,
+        max_chars=MAX_CHARS, min_chars=MIN_CHARS, max_words_approx=MAX_WORDS_APPROX,
     ), 400
 
 
