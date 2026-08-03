@@ -12,12 +12,12 @@ from __future__ import annotations
 import os
 import re
 
-from flask import Flask, render_template_string, request
+from flask import (
+    Flask, abort, jsonify, redirect, render_template_string, request, url_for,
+)
 
-from plagiarism.cache import Cache
-from plagiarism.engine import check_text
 from plagiarism.providers import ProviderError, get_provider
-from plagiarism.report import render_html
+from webapp.jobs import JobManager
 
 try:
     from dotenv import load_dotenv
@@ -54,6 +54,19 @@ def _serper_key_count() -> int:
 
 KEYS_COUNT = _serper_key_count()
 TOTAL_QUOTA = KEYS_COUNT * 2500  # общий бесплатный запас запросов по всем ключам
+
+# фоновая обработка: задача крутится в потоке через весь пул ключей,
+# страница опрашивает прогресс (обходит лимит Cloudflare ~100 c на запрос)
+WEB_JOB_DELAY = float(os.environ.get("WEB_JOB_DELAY", "0.2"))
+_job_cap = os.environ.get("WEB_JOB_MAX_QUERIES", "").strip()
+jobs = JobManager(
+    lambda: get_provider(WEB_PROVIDER),
+    cache_path=CACHE_PATH,
+    threshold=WEB_THRESHOLD,
+    delay=WEB_JOB_DELAY,
+    max_queries=int(_job_cap) if _job_cap else None,  # None -> весь пул (free_limit)
+    workers=int(os.environ.get("WEB_JOB_WORKERS", "2")),
+)
 
 INDEX = r"""<!DOCTYPE html>
 <html lang="ru"><head>
@@ -112,9 +125,9 @@ INDEX = r"""<!DOCTYPE html>
       <span>минимум {{ min_chars }} символов</span>
     </div>
     <div class="limits">
-      📏 Максимум <b>{{ max_words|sp }} слов</b> за проверку. За один прогон проверяется
-      до <b>{{ max_queries }}</b> фрагментов-фраз; для полного покрытия длинного текста
-      запускайте повторно — проверенное берётся из кэша и не тратит лимит.
+      📏 Максимум <b>{{ max_words|sp }} слов</b>. Проверка идёт в фоне с показом прогресса —
+      весь текст обрабатывается за один запуск; уже проверенные фразы берутся из кэша и не
+      тратят лимит.
       {% if keys_count > 1 %}<br>🔑 Пул из <b>{{ keys_count }}</b> ключей serper — общий запас ≈ <b>{{ total_quota|sp }}</b> запросов, переключение при исчерпании автоматическое.{% endif %}
     </div>
     <div class="row">
@@ -153,6 +166,76 @@ BACK_BANNER = """<div style="position:sticky;top:0;background:#111;color:#fff;pa
 font:14px -apple-system,Segoe UI,Arial,sans-serif;text-align:center;z-index:99">
 <a href="/" style="color:#8ab4ff;text-decoration:none">← проверить другой текст</a></div>"""
 
+PROGRESS = r"""<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Проверка… · Антиплагиат</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0;
+         background: #f6f7f9; color: #1a1a1a; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 64px 16px; text-align: center; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  .sub { color: #666; margin-bottom: 28px; }
+  .bar { height: 14px; background: #e6e8eb; border-radius: 999px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: #2563eb; border-radius: 999px;
+          transition: width .5s ease; }
+  .stat { margin-top: 16px; color: #444; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .spinner { width: 34px; height: 34px; border: 4px solid #c9d2e3; border-top-color: #2563eb;
+             border-radius: 50%; margin: 0 auto 22px; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+         padding: 14px; border-radius: 10px; margin-top: 20px; }
+  a.home { color: #2563eb; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0f1115; color: #e6e6e6; }
+    .sub, .stat { color: #b8bdc7; }
+    .bar { background: #232833; }
+  }
+</style></head>
+<body><div class="wrap">
+  <div class="spinner" id="sp"></div>
+  <h1 id="title">Проверяем текст…</h1>
+  <div class="sub" id="phase">Ставим задачу в очередь</div>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <div class="stat" id="stat">—</div>
+  <div id="box"></div>
+  <script>
+    var ID = "{{ job_id }}";
+    var fill = document.getElementById('fill'), stat = document.getElementById('stat');
+    var phase = document.getElementById('phase'), title = document.getElementById('title');
+    var nf = new Intl.NumberFormat('ru-RU');
+    function poll() {
+      fetch('/job/' + ID + '/status').then(function (r) { return r.json(); }).then(function (s) {
+        if (s.status === 'unknown') { phase.textContent = 'Задача не найдена'; return; }
+        if (s.status === 'done') {
+          fill.style.width = '100%';
+          window.location = '/job/' + ID + '/report';
+          return;
+        }
+        if (s.status === 'error') {
+          document.getElementById('sp').style.display = 'none';
+          title.textContent = 'Ошибка';
+          phase.textContent = '';
+          document.getElementById('box').innerHTML =
+            '<div class="err">' + (s.error || 'Не удалось выполнить проверку') + '</div>' +
+            '<p><a class="home" href="/">← вернуться</a></p>';
+          return;
+        }
+        var pct = s.progress || 0;
+        fill.style.width = pct + '%';
+        phase.textContent = s.total ? 'Ищем совпадения в интернете…' : 'Готовим фрагменты…';
+        stat.textContent = s.total
+          ? (nf.format(s.checked) + ' / ' + nf.format(s.total) + ' фрагментов · ' +
+             nf.format(s.queries_used) + ' запросов' + (s.stopped_early ? ' · лимит исчерпан' : ''))
+          : 'запуск…';
+        setTimeout(poll, 1500);
+      }).catch(function () { setTimeout(poll, 2500); });
+    }
+    poll();
+  </script>
+</div></body></html>"""
+
 
 @app.get("/")
 def index():
@@ -177,7 +260,7 @@ def check():
         try:
             text = upload.read().decode("utf-8", errors="replace").strip()
         except Exception:
-            text = text
+            pass
     try:
         threshold = float(request.form.get("threshold") or WEB_THRESHOLD)
     except ValueError:
@@ -193,21 +276,37 @@ def check():
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
 
+    # ключ должен быть настроен ещё до постановки задачи
     try:
-        provider = get_provider(WEB_PROVIDER)
+        get_provider(WEB_PROVIDER)
     except ProviderError as exc:
         return _index_error(f"Провайдер не настроен: {exc}", text, threshold)
 
-    cache = Cache(CACHE_PATH)
-    try:
-        report = check_text(
-            text, provider, cache=cache, threshold=threshold,
-            max_queries=WEB_MAX_QUERIES, delay=0.0,
-        )
-    except Exception as exc:  # не роняем демо на непредвиденной ошибке
-        return _index_error(f"Ошибка при проверке: {exc}", text, threshold)
+    job_id = jobs.submit(text, threshold)
+    return redirect(url_for("job_page", job_id=job_id))
 
-    return BACK_BANNER + render_html(report, title="Отчёт · Антиплагиат")
+
+@app.get("/job/<job_id>")
+def job_page(job_id):
+    if jobs.get(job_id) is None:
+        abort(404)
+    return render_template_string(PROGRESS, job_id=job_id)
+
+
+@app.get("/job/<job_id>/status")
+def job_status(job_id):
+    job = jobs.get(job_id)
+    if job is None:
+        return jsonify({"status": "unknown"}), 404
+    return jsonify(job.public())
+
+
+@app.get("/job/<job_id>/report")
+def job_report(job_id):
+    job = jobs.get(job_id)
+    if job is None or job.status != "done":
+        abort(404)
+    return BACK_BANNER + job.report_html
 
 
 def _index_error(msg: str, text: str, threshold: float):

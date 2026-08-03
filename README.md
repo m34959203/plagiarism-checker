@@ -173,16 +173,22 @@ pytest                # или: python -m pytest -q
 
 ## Веб-приложение
 
-Тонкая обёртка над тем же движком (`webapp/app.py`, Flask):
+Тонкая обёртка над тем же движком (`webapp/app.py`, Flask). Проверка ставится в
+**фоновую очередь** (`webapp/jobs.py`) и крутится в потоке через весь пул ключей;
+страница опрашивает прогресс и по готовности показывает отчёт — так большой текст
+(до 15 000 слов) проверяется целиком за один запуск, не упираясь в таймаут запроса.
 
 ```bash
 pip install -r requirements-web.txt
-WEB_PROVIDER=serper WEB_MAX_QUERIES=30 python webapp/app.py   # http://localhost:8790
-# прод:
-gunicorn --bind 0.0.0.0:8790 --workers 2 --timeout 120 webapp.app:app
+WEB_PROVIDER=serper WEB_MAX_WORDS=15000 python webapp/app.py   # http://localhost:8790
+# прод — ОДИН воркер с потоками (задачи хранятся в памяти процесса):
+gunicorn --bind 0.0.0.0:8790 --workers 1 --threads 8 --timeout 120 webapp.app:app
 # или через Docker:
 docker compose up -d --build
 ```
+
+Маршруты: `POST /check` → редирект на `/job/<id>` (страница прогресса);
+`/job/<id>/status` (JSON), `/job/<id>/report` (готовый HTML-отчёт), `/health`.
 
 ---
 

@@ -17,4 +17,6 @@ ENV PORT=8790 \
 VOLUME ["/data"]
 EXPOSE 8790
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8790", "--workers", "2", "--timeout", "120", "webapp.app:app"]
+# один воркер + потоки: фоновые задачи хранятся в памяти процесса,
+# поэтому опрос статуса должен попадать в тот же воркер
+CMD ["gunicorn", "--bind", "0.0.0.0:8790", "--workers", "1", "--threads", "8", "--timeout", "120", "webapp.app:app"]
