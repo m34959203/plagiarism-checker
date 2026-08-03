@@ -160,7 +160,9 @@ def render_html(report: Report, *, title: str = "Отчёт о проверке 
     .chip, .doc, table {{ background: #171a21; border-color: #2a2f3a; }}
     th {{ background: #1c2029; }}
     .sub, .chip {{ color: #b8bdc7; }}
+    .chip b {{ color: #f2f4f8; }}
     th, td {{ border-color: #262b34; }}
+    td a {{ color: #6ea8fe; }}
   }}
 </style>
 </head>
